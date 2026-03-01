@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a1628">
+  <title>NefrodiagPro — Supporto Diagnostico Nefrologico</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔬</text></svg>">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; width: 100%; }
+    body {
+      font-family: 'IBM Plex Sans', 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #0a1628; color: #c0cad4; overflow: hidden;
+    }
+    input, select, textarea, button { font-family: inherit; }
+    textarea { font-size: 14px !important; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0a1628; }
+    ::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2a4a6f; }
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type="number"] { -moz-appearance: textfield; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    @keyframes slideIn { from { transform: translateX(100px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    /* Print styles */
+    @media print {
+      body { background: white !important; color: black !important; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ====== UTILITY FUNCTIONS ======
+    const LS = {
+      get: (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } },
+      set: (key, val) => { try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) { console.error(e); } },
+    };
+
+    // ====== CLINICAL CALCULATIONS ======
+    const calcBMI = (w, h) => { if (!w || !h) return null; return (w / ((h/100) ** 2)).toFixed(1); };
+
+    const calcEGFR = (cr, age, sex) => {
+      if (!cr || !age || !sex) return null;
+      const c = parseFloat(cr), a = parseFloat(age), f = sex === "F";
+      const k = f ? 0.7 : 0.9, al = f ? -0.241 : -0.302;
+      let e = 142 * Math.pow(Math.min(c/k, 1), al) * Math.pow(Math.max(c/k, 1), -1.200) * Math.pow(0.9938, a);
+      if (f) e *= 1.012;
+      return e.toFixed(1);
+    };
+
+    const calcMELD = (bil, inr, cr, na) => {
+      if (!bil || !inr || !cr) return null;
+      let c = Math.max(1, Math.min(parseFloat(cr), 4));
+      let b = Math.max(1, parseFloat(bil));
+      let i = Math.max(1, parseFloat(inr));
+      let n = na ? Math.max(125, Math.min(parseFloat(na), 137)) : 137;
+      let m = 10 * (0.957*Math.log(c) + 0.378*Math.log(b) + 1.120*Math.log(i) + 0.643);
+      m = Math.round(m);
+      if (m > 11) m = m + 1.32*(137-n) - 0.033*m*(137-n);
+      return Math.round(Math.max(6, Math.min(m, 40)));
+    };
+
+    const calcCHA2DS2 = (d) => {
+      let s = 0;
+      if (parseInt(d.age) >= 75) s += 2; else if (parseInt(d.age) >= 65) s += 1;
+      if (d.sex === "F") s += 1;
+      if (d.chf) s += 1; if (d.htn) s += 1; if (d.stroke) s += 2;
+      if (d.vasc) s += 1; if (d.dm) s += 1;
+      return s;
+    };
+
+    const getKDIGO = (egfr) => {
+      if (!egfr) return null;
+      const e = parseFloat(egfr);
+      if (e >= 90) return { stage: "G1", desc: "Normale o elevato", color: "#22c55e" };
+      if (e >= 60) return { stage: "G2", desc: "Lievemente ridotto", color: "#84cc16" };
+      if (e >= 45) return { stage: "G3a", desc: "Riduzione lieve-moderata", color: "#eab308" };
+      if (e >= 30) return { stage: "G3b", desc: "Riduzione moderata-severa", color: "#f97316" };
+      if (e >= 15) return { stage: "G4", desc: "Riduzione severa", color: "#ef4444" };
+      return { stage: "G5", desc: "Insufficienza renale terminale", color: "#991b1b" };
+    };
+
+    const TABS = [
+      { id: "dashboard", label: "Dashboard", icon: "📊" },
+      { id: "anagrafica", label: "Anagrafica", icon: "👤" },
+      { id: "anamnesi", label: "Anamnesi", icon: "📋" },
+      { id: "esame", label: "Esame Obiettivo", icon: "🩺" },
+      { id: "laboratorio", label: "Laboratorio", icon: "🧪" },
+      { id: "scores", label: "Score Clinici", icon: "📐" },
+      { id: "diagnosi", label: "Diagnosi AI", icon: "🧠" },
+      { id: "storico", label: "Storico", icon: "📁" },
+      { id: "report", label: "Report", icon: "📄" },
+    ];
+
+    const emptyPatient = () => ({
+      id: Date.now().toString(),
+      createdAt: new Date().toISOString(),
+      an: { nome:"", cognome:"", dn:"", sesso:"", peso:"", altezza:"", etnia:"", prof:"", tel:"" },
+      am: {
+        fam:"", patRem:"", patProx:"", allergie:"", fumo:"no", alcol:"no", att:"sedentario", farmaci:"",
+        com: { diabete:false, ipertensione:false, scompenso:false, fa:false, ictus:false, vasc:false,
+               dislip:false, obesita:false, epat:false, neo:false, autoim:false, trap:false },
+        sint:"", dialisi:"no", tipoDial:""
+      },
+      es: { pas:"", pad:"", fc:"", fr:"", temp:"", spo2:"", edemi:"no", sedeEd:"", gradoEd:"",
+            ascite:"no", vers:"no", soffi:"no", crep:"no", globo:"no", dolore:"no", note:"" },
+      lab: {
+        cr:"", urea:"", azot:"", au:"",
+        na:"", k:"", cl:"", ca:"", p:"", mg:"", hco3:"",
+        hb:"", ht:"", wbc:"", plt:"",
+        glic:"", hba1c:"",
+        alb:"", protT:"",
+        ast:"", alt:"", bil:"", ggt:"", ldh:"",
+        inr:"", pt:"", fib:"",
+        pcr:"", ves:"", proct:"",
+        c3:"", c4:"", ana:"", anca:"", dsdna:"",
+        ferr:"", sid:"", transf:"",
+        tsh:"", pth:"", vitd:"",
+        prot24:"", microalb:"", albcr:"", urNote:"",
+        ega: { ph:"", pco2:"", po2:"", hco3:"", be:"", latt:"" }
+      },
+      diag: null, notes: ""
+    });
+
+    // ====== REUSABLE COMPONENTS ======
+    const Inp = ({ label, value, onChange, type="text", unit="", ph="", small=false }) => (
+      <div style={{ marginBottom:8, flex: small ? "1 1 110px" : "1 1 180px", minWidth: small ? 110 : 160 }}>
+        <label style={{ display:"block", fontSize:10.5, color:"#7899aa", marginBottom:2, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.4px" }}>{label}</label>
+        <div style={{ display:"flex", alignItems:"center", gap:3 }}>
+          <input type={type} value={value||""} onChange={e => onChange(e.target.value)} placeholder={ph}
+            style={{ width:"100%", padding:"7px 9px", border:"1px solid #233345", borderRadius:5, background:"#0c1825",
+              color:"#e0e6ed", fontSize:13.5, outline:"none", transition:"border 0.2s" }}
+            onFocus={e => e.target.style.borderColor="#0ea5e9"}
+            onBlur={e => e.target.style.borderColor="#233345"} />
+          {unit && <span style={{ fontSize:10, color:"#556677", whiteSpace:"nowrap" }}>{unit}</span>}
+        </div>
+      </div>
+    );
+
+    const Sel = ({ label, value, onChange, opts }) => (
+      <div style={{ marginBottom:8, flex:"1 1 180px", minWidth:160 }}>
+        <label style={{ display:"block", fontSize:10.5, color:"#7899aa", marginBottom:2, fontWeight:700, textTransform:"uppercase", letterSpacing:"0.4px" }}>{label}</label>
+        <select value={value||""} onChange={e => onChange(e.target.value)}
+          style={{ width:"100%", padding:"7px 9px", border:"1px solid #233345", borderRadius:5,
+            background:"#0c1825", color:"#e0e6ed", fontSize:13.5, outline:"none" }}>
+          {opts.map(o => <option key={o.v} value={o.v}>{o.l}</option>)}
+        </select>
+      </div>
+    );
+
+    const Chk = ({ label, checked, onChange }) => (
+      <label style={{ display:"flex", alignItems:"center", gap:7, padding:"5px 9px",
+        background: checked ? "rgba(14,165,233,0.1)" : "transparent",
+        border:`1px solid ${checked ? "#0ea5e9" : "#233345"}`,
+        borderRadius:5, cursor:"pointer", fontSize:12.5, color:"#b0bcc8", transition:"all 0.15s", flex:"1 1 170px" }}>
+        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)}
+          style={{ accentColor:"#0ea5e9", margin:0 }} />
+        {label}
+      </label>
+    );
+
+    const Sec = ({ children, icon }) => (
+      <div style={{ display:"flex", alignItems:"center", gap:7, marginBottom:12, marginTop:16,
+        paddingBottom:7, borderBottom:"1px solid #182838" }}>
+        {icon && <span style={{ fontSize:16 }}>{icon}</span>}
+        <h3 style={{ margin:0, fontSize:14, fontWeight:700, color:"#7dd3fc", letterSpacing:"0.2px" }}>{children}</h3>
+      </div>
+    );
+
+    const Card = ({ children, style={} }) => (
+      <div className="fade-in" style={{ background:"#111d2e", borderRadius:9, padding:16,
+        border:"1px solid #1a2838", marginBottom:12, ...style }}>{children}</div>
+    );
+
+    const Tx = ({ value, onChange, ph, rows=3 }) => (
+      <textarea value={value||""} onChange={e => onChange(e.target.value)} placeholder={ph} rows={rows}
+        style={{ width:"100%", padding:9, background:"#0c1825", border:"1px solid #233345", borderRadius:5,
+          color:"#e0e6ed", fontSize:13, resize:"vertical", outline:"none", lineHeight:1.5, boxSizing:"border-box" }}
+        onFocus={e => e.target.style.borderColor="#0ea5e9"}
+        onBlur={e => e.target.style.borderColor="#233345"} />
+    );
+
+    // ====== MAIN APPLICATION ======
+    function App() {
+      const [tab, setTab] = useState("dashboard");
+      const [pt, setPt] = useState(emptyPatient());
+      const [pts, setPts] = useState([]);
+      const [loading, setLoading] = useState(false);
+      const [ai, setAi] = useState(null);
+      const [menu, setMenu] = useState(false);
+      const [notif, setNotif] = useState(null);
+
+      useEffect(() => { const d = LS.get("nephro_pts"); if (d) setPts(d); }, []);
+      const savePts = (l) => { setPts(l); LS.set("nephro_pts", l); };
+      const notify = (m, t="ok") => { setNotif({m,t}); setTimeout(() => setNotif(null), 3000); };
+
+      const uA = (f,v) => setPt(p => ({...p, an:{...p.an,[f]:v}}));
+      const uAm = (f,v) => setPt(p => ({...p, am:{...p.am,[f]:v}}));
+      const uC = (f,v) => setPt(p => ({...p, am:{...p.am, com:{...p.am.com,[f]:v}}}));
+      const uE = (f,v) => setPt(p => ({...p, es:{...p.es,[f]:v}}));
+      const uL = (f,v) => setPt(p => ({...p, lab:{...p.lab,[f]:v}}));
+      const uEga = (f,v) => setPt(p => ({...p, lab:{...p.lab, ega:{...p.lab.ega,[f]:v}}}));
+
+      const getAge = () => {
+        if (!pt.an.dn) return null;
+        const b = new Date(pt.an.dn), n = new Date();
+        let a = n.getFullYear() - b.getFullYear();
+        if (n.getMonth() < b.getMonth() || (n.getMonth() === b.getMonth() && n.getDate() < b.getDate())) a--;
+        return a;
+      };
+
+      const sc = {
+        bmi: calcBMI(pt.an.peso, pt.an.altezza),
+        egfr: calcEGFR(pt.lab.cr, getAge(), pt.an.sesso),
+        meld: calcMELD(pt.lab.bil, pt.lab.inr, pt.lab.cr, pt.lab.na),
+        cha2: calcCHA2DS2({ age:getAge(), sex:pt.an.sesso, chf:pt.am.com.scompenso,
+          htn:pt.am.com.ipertensione, stroke:pt.am.com.ictus, vasc:pt.am.com.vasc, dm:pt.am.com.diabete }),
+        kdigo: getKDIGO(calcEGFR(pt.lab.cr, getAge(), pt.an.sesso)),
+      };
+
+      const savePt = () => {
+        const u = {...pt, diag:ai, updatedAt: new Date().toISOString()};
+        const i = pts.findIndex(p => p.id === u.id);
+        const nl = i >= 0 ? pts.map((p,idx) => idx===i ? u : p) : [u, ...pts];
+        savePts(nl); notify("Paziente salvato con successo");
+      };
+
+      const loadPt = (p) => { setPt(p); setAi(p.diag||null); setTab("anagrafica"); setMenu(false); notify(`Caricato: ${p.an.cognome} ${p.an.nome}`); };
+      const newPt = () => { setPt(emptyPatient()); setAi(null); setTab("anagrafica"); setMenu(false); };
+      const delPt = (id) => { savePts(pts.filter(p => p.id !== id)); notify("Paziente eliminato", "warn"); };
+
+      // ====== BUILD PATIENT SUMMARY FOR AI ======
+      const buildSummary = () => {
+        const a = pt.an, am = pt.am, e = pt.es, l = pt.lab, age = getAge();
+        const comNames = {
+          diabete:"Diabete", ipertensione:"Ipertensione", scompenso:"Scompenso cardiaco",
+          fa:"Fibrillazione atriale", ictus:"Ictus/TIA", vasc:"Vasculopatia periferica",
+          dislip:"Dislipidemia", obesita:"Obesità", epat:"Epatopatia cronica",
+          neo:"Neoplasia", autoim:"Malattia autoimmune", trap:"Trapianto"
+        };
+        const comList = Object.entries(am.com).filter(([,v])=>v).map(([k])=>comNames[k]||k);
+
+        return `DATI PAZIENTE:
+Anagrafica: ${a.cognome} ${a.nome}, ${a.sesso==="M"?"Maschio":"Femmina"}, ${age} anni, Peso ${a.peso}kg, Altezza ${a.altezza}cm, Etnia: ${a.etnia||"NS"}
+
+ANAMNESI FAMILIARE: ${am.fam||"Non riferita"}
+ANAMNESI PATOLOGICA REMOTA: ${am.patRem||"Non riferita"}
+Comorbidità: ${comList.length>0?comList.join(", "):"Nessuna"}
+Dialisi: ${am.dialisi} ${am.tipoDial?`(${am.tipoDial})`:""}
+ANAMNESI PROSSIMA: ${am.patProx||"Non riferita"}
+Sintomi attuali: ${am.sint||"Non riferiti"}
+ALLERGIE: ${am.allergie||"Nessuna nota"}
+TERAPIA IN CORSO: ${am.farmaci||"Nessuna"}
+Fumo: ${am.fumo}, Alcol: ${am.alcol}, Attività: ${am.att}
+
+ESAME OBIETTIVO:
+PA: ${e.pas||"?"}/${e.pad||"?"} mmHg, FC: ${e.fc||"?"} bpm, FR: ${e.fr||"?"}/min, T: ${e.temp||"?"}°C, SpO2: ${e.spo2||"?"}%
+Edemi: ${e.edemi}${e.sedeEd?` (${e.sedeEd}, ${e.gradoEd})`:""}, Ascite: ${e.ascite}, Versamento: ${e.vers}
+Soffi: ${e.soffi}, Crepitii: ${e.crep}, Globo vescicale: ${e.globo}, Dolore logge: ${e.dolore}
+Note: ${e.note||"Nessuna"}
+
+LABORATORIO:
+Renale: Cr ${l.cr||"?"}, Urea ${l.urea||"?"}, Azotemia ${l.azot||"?"}, Ac.urico ${l.au||"?"}
+Elettroliti: Na ${l.na||"?"}, K ${l.k||"?"}, Cl ${l.cl||"?"}, Ca ${l.ca||"?"}, P ${l.p||"?"}, Mg ${l.mg||"?"}, HCO3 ${l.hco3||"?"}
+Emocromo: Hb ${l.hb||"?"}, Ht ${l.ht||"?"}, WBC ${l.wbc||"?"}, PLT ${l.plt||"?"}
+Metabolismo: Glic ${l.glic||"?"}, HbA1c ${l.hba1c||"?"}%
+Proteine: Alb ${l.alb||"?"}, ProtT ${l.protT||"?"}
+Epatico: AST ${l.ast||"?"}, ALT ${l.alt||"?"}, Bil ${l.bil||"?"}, GGT ${l.ggt||"?"}, LDH ${l.ldh||"?"}
+Coagulazione: INR ${l.inr||"?"}, PT ${l.pt||"?"}, Fib ${l.fib||"?"}
+Flogosi: PCR ${l.pcr||"?"}, VES ${l.ves||"?"}, PCT ${l.proct||"?"}
+Immunologia: C3 ${l.c3||"?"}, C4 ${l.c4||"?"}, ANA ${l.ana||"?"}, ANCA ${l.anca||"?"}, Anti-dsDNA ${l.dsdna||"?"}
+Marziale: Ferritina ${l.ferr||"?"}, Sideremia ${l.sid||"?"}, Transferrina ${l.transf||"?"}
+Endocrino: TSH ${l.tsh||"?"}, PTH ${l.pth||"?"}, VitD ${l.vitd||"?"}
+Urine: Prot24h ${l.prot24||"?"}, Microalb ${l.microalb||"?"}, Alb/Cr ${l.albcr||"?"}
+${l.urNote?`Note urine: ${l.urNote}`:""}
+EGA: pH ${l.ega.ph||"?"}, pCO2 ${l.ega.pco2||"?"}, pO2 ${l.ega.po2||"?"}, HCO3 ${l.ega.hco3||"?"}, BE ${l.ega.be||"?"}, Latt ${l.ega.latt||"?"}
+
+SCORE CALCOLATI:
+BMI: ${sc.bmi||"N/C"}, eGFR CKD-EPI: ${sc.egfr||"N/C"} mL/min${sc.kdigo?` → KDIGO ${sc.kdigo.stage}`:""}
+MELD: ${sc.meld||"N/C"}, CHA₂DS₂-VASc: ${sc.cha2??"N/C"}
+
+Fornisci diagnosi differenziale completa con probabilità, terapia farmacologica aggiustata per funzione renale e accertamenti suggeriti.`;
+      };
+
+      // ====== AI DIAGNOSIS ======
+      const runDiag = async () => {
+        setLoading(true); setAi(null);
+        try {
+          const resp = await fetch("/api/diagnose", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ patientData: buildSummary() }),
+          });
+          const data = await resp.json();
+          if (data.error) { setAi({ error: data.error }); setLoading(false); return; }
+          const text = (data.content||[]).map(i => i.text||"").join("");
+          const cleaned = text.replace(/```json|```/g, "").trim();
+          try { setAi(JSON.parse(cleaned)); } catch { setAi({ error: "Errore parsing risposta AI: " + text.substring(0, 300) }); }
+          setTab("diagnosi");
+        } catch (err) { setAi({ error: "Errore connessione: " + err.message }); }
+        setLoading(false);
+      };
+
+      // ====== PRINT REPORT ======
+      const printReport = () => {
+        const w = window.open("", "_blank");
+        if (!w) return;
+        const a = pt.an, age = getAge();
+        let dHtml = "";
+        if (ai && !ai.error) {
+          dHtml = `<h2>Diagnosi Differenziale AI</h2><p><em>${ai.riepilogoClinico||""}</em></p>
+          <table><thead><tr><th>Patologia</th><th>Prob.</th><th>Gravità</th><th>Categoria</th><th>Descrizione</th></tr></thead><tbody>
+          ${(ai.diagnosiDifferenziali||[]).map(d=>`<tr><td><b>${d.patologia}</b></td><td>${d.probabilita}%</td><td>${d.gravita}</td><td>${d.categoria}</td><td>${d.descrizione}</td></tr>`).join("")}</tbody></table>
+          <h2>Terapia Farmacologica</h2>
+          <table><thead><tr><th>Farmaco</th><th>Classe</th><th>Dosaggio</th><th>Agg. Renale</th><th>Indicazione</th></tr></thead><tbody>
+          ${(ai.terapiaFarmacologica||[]).map(f=>`<tr><td><b>${f.farmaco}</b></td><td>${f.classe}</td><td>${f.dosaggio}</td><td>${f.aggiustamentoRenale}</td><td>${f.indicazione}</td></tr>`).join("")}</tbody></table>
+          ${ai.accertamentiSuggeriti?.length?`<h2>Accertamenti Suggeriti</h2><table><thead><tr><th>Esame</th><th>Motivazione</th><th>Urgenza</th></tr></thead><tbody>${ai.accertamentiSuggeriti.map(a=>`<tr><td><b>${a.esame}</b></td><td>${a.motivazione}</td><td>${a.urgenza}</td></tr>`).join("")}</tbody></table>`:""}
+          ${ai.alertCritici?.length?`<div style="background:#fff3cd;border:1px solid #ffc107;padding:10px;margin:10px 0;border-radius:4px"><b>⚠️ Alert Critici:</b><ul>${ai.alertCritici.map(x=>`<li>${x}</li>`).join("")}</ul></div>`:""}
+          ${ai.noteCliniche?`<h2>Note Cliniche</h2><p>${ai.noteCliniche}</p>`:""}`;
+        }
+        w.document.write(`<!DOCTYPE html><html><head><title>Report - ${a.cognome} ${a.nome}</title>
+        <style>body{font-family:Georgia,serif;max-width:800px;margin:0 auto;padding:20px;color:#1a1a2e;font-size:12px;line-height:1.5}
+        h1{color:#0c2d48;border-bottom:3px solid #0c2d48;padding-bottom:8px;font-size:20px}
+        h2{color:#145374;margin-top:18px;font-size:14px;border-bottom:1px solid #ccc;padding-bottom:4px}
+        table{width:100%;border-collapse:collapse;margin:8px 0;font-size:11px}th,td{border:1px solid #ddd;padding:4px 7px;text-align:left}
+        th{background:#f0f4f8}.sb{display:inline-block;padding:3px 10px;border-radius:4px;font-weight:bold;margin:2px;font-size:11px}
+        .disc{background:#f8f9fa;border:1px solid #dee2e6;padding:10px;margin-top:18px;border-radius:4px;font-size:10px;color:#6c757d}
+        @media print{body{margin:0;padding:10px}}</style></head><body>
+        <h1>🔬 NefrodiagPro — Report Clinico</h1>
+        <p>Data: ${new Date().toLocaleDateString("it-IT")} | Medico: ___________________</p>
+        <h2>Dati Anagrafici</h2>
+        <table><tr><td><b>Paziente:</b> ${a.cognome} ${a.nome}</td><td><b>Sesso:</b> ${a.sesso==="M"?"M":"F"}</td>
+        <td><b>Età:</b> ${age} anni</td><td><b>Peso/Alt:</b> ${a.peso}kg/${a.altezza}cm</td></tr></table>
+        <h2>Score Clinici</h2>
+        <p><span class="sb" style="background:#e3f2fd">BMI: ${sc.bmi||"N/C"}</span>
+        <span class="sb" style="background:${sc.kdigo?.color||"#eee"};color:#fff">eGFR: ${sc.egfr||"N/C"} → ${sc.kdigo?.stage||"N/C"}</span>
+        <span class="sb" style="background:#fff3e0">MELD: ${sc.meld||"N/C"}</span>
+        <span class="sb" style="background:#fce4ec">CHA₂DS₂-VASc: ${sc.cha2??"N/C"}</span></p>
+        ${dHtml}
+        <div class="disc"><b>⚕️ DISCLAIMER MEDICO-LEGALE:</b> Report generato da strumento di supporto decisionale AI (NefrodiagPro). NON sostituisce il giudizio clinico del medico curante. Destinato esclusivamente a professionisti sanitari qualificati.</div>
+        <p style="text-align:center;margin-top:15px;color:#999;font-size:9px">NefrodiagPro v1.0 — ${new Date().toLocaleString("it-IT")}</p>
+        </body></html>`);
+        w.document.close(); w.print();
+      };
+
+      // ====== RENDER TABS ======
+      const rDash = () => (
+        <div>
+          <div style={{ textAlign:"center", padding:"24px 0 16px" }}>
+            <div style={{ fontSize:44, marginBottom:6 }}>🔬</div>
+            <h1 style={{ margin:0, fontSize:26, fontWeight:800, color:"#e0f2fe", letterSpacing:"-0.5px" }}>NefrodiagPro</h1>
+            <p style={{ color:"#7dd3fc", fontSize:12, marginTop:4 }}>Strumento di Supporto Diagnostico Nefrologico</p>
+          </div>
+          <button onClick={newPt} style={{ width:"100%", padding:14, background:"linear-gradient(135deg,#0369a1,#0ea5e9)",
+            border:"none", borderRadius:9, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", marginBottom:14 }}>
+            ➕ Nuova Valutazione Paziente
+          </button>
+          <Card>
+            <Sec icon="📂">Ultimi Pazienti ({pts.length})</Sec>
+            {pts.length === 0 ? <p style={{ color:"#556677", textAlign:"center", padding:16, fontSize:13 }}>Nessun paziente. Inizia una nuova valutazione.</p> :
+              pts.slice(0,8).map(p => (
+                <div key={p.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"9px 12px",
+                  background:"#0c1825", borderRadius:7, border:"1px solid #1a2838", marginBottom:6, cursor:"pointer" }}
+                  onClick={() => loadPt(p)}>
+                  <div>
+                    <div style={{ fontWeight:700, color:"#e0e6ed", fontSize:13.5 }}>{p.an.cognome} {p.an.nome}</div>
+                    <div style={{ fontSize:10.5, color:"#556677" }}>
+                      {p.an.sesso} • {p.updatedAt ? new Date(p.updatedAt).toLocaleDateString("it-IT") : new Date(p.createdAt).toLocaleDateString("it-IT")}
+                      {p.diag && !p.diag.error ? " • 🧠 Diagnosi" : ""}
+                    </div>
+                  </div>
+                  <button onClick={e => { e.stopPropagation(); delPt(p.id); }}
+                    style={{ background:"none", border:"none", color:"#ef4444", cursor:"pointer", fontSize:14, padding:4 }}>✕</button>
+                </div>
+              ))
+            }
+          </Card>
+          <Card style={{ background:"#0c1520", borderColor:"#1e3550" }}>
+            <div style={{ display:"flex", gap:7, alignItems:"flex-start" }}>
+              <span style={{ fontSize:18 }}>⚕️</span>
+              <div style={{ fontSize:10.5, color:"#6889aa", lineHeight:1.6 }}>
+                <b style={{ color:"#fbbf24" }}>DISCLAIMER MEDICO-LEGALE:</b> NefrodiagPro è uno strumento di <b>supporto decisionale</b> basato su AI.
+                NON sostituisce il giudizio clinico. Destinato esclusivamente a professionisti sanitari qualificati.
+              </div>
+            </div>
+          </Card>
+        </div>
+      );
+
+      const rAnag = () => (
+        <Card>
+          <Sec icon="👤">Dati Anagrafici</Sec>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+            <Inp label="Cognome" value={pt.an.cognome} onChange={v=>uA("cognome",v)} ph="Cognome" />
+            <Inp label="Nome" value={pt.an.nome} onChange={v=>uA("nome",v)} ph="Nome" />
+            <Inp label="Data Nascita" type="date" value={pt.an.dn} onChange={v=>uA("dn",v)} />
+            <Sel label="Sesso" value={pt.an.sesso} onChange={v=>uA("sesso",v)}
+              opts={[{v:"",l:"Seleziona"},{v:"M",l:"Maschio"},{v:"F",l:"Femmina"}]} />
+            <Inp label="Peso" type="number" value={pt.an.peso} onChange={v=>uA("peso",v)} unit="kg" small />
+            <Inp label="Altezza" type="number" value={pt.an.altezza} onChange={v=>uA("altezza",v)} unit="cm" small />
+            <Sel label="Etnia" value={pt.an.etnia} onChange={v=>uA("etnia",v)}
+              opts={[{v:"",l:"Seleziona"},{v:"caucasica",l:"Caucasica"},{v:"africana",l:"Africana"},{v:"asiatica",l:"Asiatica"},{v:"ispanica",l:"Ispanica"},{v:"altra",l:"Altra"}]} />
+            <Inp label="Professione" value={pt.an.prof} onChange={v=>uA("prof",v)} ph="Professione" />
+            <Inp label="Telefono" value={pt.an.tel} onChange={v=>uA("tel",v)} ph="Telefono" />
+          </div>
+          {sc.bmi && <div style={{ marginTop:8, padding:"6px 12px", background:"#0c1825", borderRadius:5, display:"inline-block" }}>
+            <span style={{ fontSize:11, color:"#7899aa" }}>BMI: </span>
+            <b style={{ color: parseFloat(sc.bmi)>30?"#ef4444":parseFloat(sc.bmi)>25?"#eab308":"#22c55e" }}>{sc.bmi} kg/m²</b>
+          </div>}
+        </Card>
+      );
+
+      const rAnam = () => (
+        <div>
+          <Card><Sec icon="👨‍👩‍👧‍👦">Anamnesi Familiare</Sec><Tx value={pt.am.fam} onChange={v=>uAm("fam",v)} ph="Padre iperteso, madre diabetica tipo 2..." /></Card>
+          <Card><Sec icon="📖">Anamnesi Patologica Remota</Sec><Tx value={pt.am.patRem} onChange={v=>uAm("patRem",v)} ph="Patologie pregresse, interventi..." /></Card>
+          <Card>
+            <Sec icon="🏥">Comorbidità Attive</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+              <Chk label="Diabete mellito" checked={pt.am.com.diabete} onChange={v=>uC("diabete",v)} />
+              <Chk label="Ipertensione" checked={pt.am.com.ipertensione} onChange={v=>uC("ipertensione",v)} />
+              <Chk label="Scompenso cardiaco" checked={pt.am.com.scompenso} onChange={v=>uC("scompenso",v)} />
+              <Chk label="Fibrillazione atriale" checked={pt.am.com.fa} onChange={v=>uC("fa",v)} />
+              <Chk label="Ictus/TIA" checked={pt.am.com.ictus} onChange={v=>uC("ictus",v)} />
+              <Chk label="Vasculopatia" checked={pt.am.com.vasc} onChange={v=>uC("vasc",v)} />
+              <Chk label="Dislipidemia" checked={pt.am.com.dislip} onChange={v=>uC("dislip",v)} />
+              <Chk label="Obesità" checked={pt.am.com.obesita} onChange={v=>uC("obesita",v)} />
+              <Chk label="Epatopatia cronica" checked={pt.am.com.epat} onChange={v=>uC("epat",v)} />
+              <Chk label="Neoplasia" checked={pt.am.com.neo} onChange={v=>uC("neo",v)} />
+              <Chk label="M. autoimmune" checked={pt.am.com.autoim} onChange={v=>uC("autoim",v)} />
+              <Chk label="Trapianto" checked={pt.am.com.trap} onChange={v=>uC("trap",v)} />
+            </div>
+          </Card>
+          <Card>
+            <Sec icon="🔥">Anamnesi Prossima e Sintomi</Sec>
+            <Tx value={pt.am.patProx} onChange={v=>uAm("patProx",v)} ph="Motivo ricovero, evoluzione..." />
+            <div style={{ marginTop:10 }}><Sec icon="😷">Sintomi Attuali</Sec>
+            <Tx value={pt.am.sint} onChange={v=>uAm("sint",v)} ph="Oliguria, ematuria, edemi, dispnea..." /></div>
+          </Card>
+          <Card>
+            <Sec icon="💊">Terapia e Allergie</Sec>
+            <Tx value={pt.am.farmaci} onChange={v=>uAm("farmaci",v)} ph="Ramipril 5mg/die, Furosemide 25mg x2..." />
+            <div style={{ marginTop:8 }}><Inp label="Allergie" value={pt.am.allergie} onChange={v=>uAm("allergie",v)} ph="Farmaci, alimenti..." /></div>
+          </Card>
+          <Card>
+            <Sec icon="🏃">Stile di Vita</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Sel label="Fumo" value={pt.am.fumo} onChange={v=>uAm("fumo",v)}
+                opts={[{v:"no",l:"Non fumatore"},{v:"ex",l:"Ex fumatore"},{v:"lieve",l:"<10/die"},{v:"moderato",l:"10-20/die"},{v:"pesante",l:">20/die"}]} />
+              <Sel label="Alcol" value={pt.am.alcol} onChange={v=>uAm("alcol",v)}
+                opts={[{v:"no",l:"Astemio"},{v:"moderato",l:"Moderato"},{v:"eccessivo",l:"Eccessivo"}]} />
+              <Sel label="Attività" value={pt.am.att} onChange={v=>uAm("att",v)}
+                opts={[{v:"sedentario",l:"Sedentario"},{v:"leggera",l:"Leggera"},{v:"moderata",l:"Moderata"},{v:"intensa",l:"Intensa"}]} />
+              <Sel label="Dialisi" value={pt.am.dialisi} onChange={v=>uAm("dialisi",v)}
+                opts={[{v:"no",l:"No"},{v:"si",l:"Sì"}]} />
+              {pt.am.dialisi==="si" && <Sel label="Tipo" value={pt.am.tipoDial} onChange={v=>uAm("tipoDial",v)}
+                opts={[{v:"",l:"Seleziona"},{v:"emodialisi",l:"Emodialisi"},{v:"peritoneale",l:"Peritoneale"}]} />}
+            </div>
+          </Card>
+        </div>
+      );
+
+      const rEsame = () => (
+        <div>
+          <Card>
+            <Sec icon="💓">Parametri Vitali</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="PA Sistolica" type="number" value={pt.es.pas} onChange={v=>uE("pas",v)} unit="mmHg" small />
+              <Inp label="PA Diastolica" type="number" value={pt.es.pad} onChange={v=>uE("pad",v)} unit="mmHg" small />
+              <Inp label="FC" type="number" value={pt.es.fc} onChange={v=>uE("fc",v)} unit="bpm" small />
+              <Inp label="FR" type="number" value={pt.es.fr} onChange={v=>uE("fr",v)} unit="/min" small />
+              <Inp label="Temperatura" type="number" value={pt.es.temp} onChange={v=>uE("temp",v)} unit="°C" small />
+              <Inp label="SpO2" type="number" value={pt.es.spo2} onChange={v=>uE("spo2",v)} unit="%" small />
+            </div>
+          </Card>
+          <Card>
+            <Sec icon="🦶">Edemi e Versamenti</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Sel label="Edemi" value={pt.es.edemi} onChange={v=>uE("edemi",v)} opts={[{v:"no",l:"Assenti"},{v:"si",l:"Presenti"}]} />
+              {pt.es.edemi==="si" && <>
+                <Inp label="Sede" value={pt.es.sedeEd} onChange={v=>uE("sedeEd",v)} ph="Arti inferiori..." />
+                <Sel label="Grado" value={pt.es.gradoEd} onChange={v=>uE("gradoEd",v)} opts={[{v:"",l:"Sel."},{v:"1+",l:"1+"},{v:"2+",l:"2+"},{v:"3+",l:"3+"},{v:"4+",l:"4+"}]} />
+              </>}
+              <Sel label="Ascite" value={pt.es.ascite} onChange={v=>uE("ascite",v)} opts={[{v:"no",l:"Assente"},{v:"lieve",l:"Lieve"},{v:"moderata",l:"Moderata"},{v:"tesa",l:"Tesa"}]} />
+              <Sel label="Versamento" value={pt.es.vers} onChange={v=>uE("vers",v)} opts={[{v:"no",l:"Assente"},{v:"si",l:"Presente"}]} />
+            </div>
+          </Card>
+          <Card>
+            <Sec icon="🫀">Obiettività</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Sel label="Soffi cardiaci" value={pt.es.soffi} onChange={v=>uE("soffi",v)} opts={[{v:"no",l:"Assenti"},{v:"si",l:"Presenti"}]} />
+              <Sel label="Crepitii" value={pt.es.crep} onChange={v=>uE("crep",v)} opts={[{v:"no",l:"Assenti"},{v:"basali",l:"Basali"},{v:"diffusi",l:"Diffusi"}]} />
+              <Sel label="Globo vescicale" value={pt.es.globo} onChange={v=>uE("globo",v)} opts={[{v:"no",l:"Assente"},{v:"si",l:"Presente"}]} />
+              <Sel label="Dolore logge" value={pt.es.dolore} onChange={v=>uE("dolore",v)} opts={[{v:"no",l:"Assente"},{v:"dx",l:"Destro"},{v:"sx",l:"Sinistro"},{v:"bil",l:"Bilaterale"}]} />
+            </div>
+            <div style={{ marginTop:8 }}><Tx value={pt.es.note} onChange={v=>uE("note",v)} ph="Note esame obiettivo..." rows={2} /></div>
+          </Card>
+        </div>
+      );
+
+      const rLab = () => (
+        <div>
+          <Card><Sec icon="🫘">Funzione Renale</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="Creatinina" type="number" value={pt.lab.cr} onChange={v=>uL("cr",v)} unit="mg/dL" small />
+              <Inp label="Urea" type="number" value={pt.lab.urea} onChange={v=>uL("urea",v)} unit="mg/dL" small />
+              <Inp label="Azotemia" type="number" value={pt.lab.azot} onChange={v=>uL("azot",v)} unit="mg/dL" small />
+              <Inp label="Acido urico" type="number" value={pt.lab.au} onChange={v=>uL("au",v)} unit="mg/dL" small />
+            </div></Card>
+          <Card><Sec icon="⚡">Elettroliti</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="Na" type="number" value={pt.lab.na} onChange={v=>uL("na",v)} unit="mEq/L" small />
+              <Inp label="K" type="number" value={pt.lab.k} onChange={v=>uL("k",v)} unit="mEq/L" small />
+              <Inp label="Cl" type="number" value={pt.lab.cl} onChange={v=>uL("cl",v)} unit="mEq/L" small />
+              <Inp label="Ca" type="number" value={pt.lab.ca} onChange={v=>uL("ca",v)} unit="mg/dL" small />
+              <Inp label="P" type="number" value={pt.lab.p} onChange={v=>uL("p",v)} unit="mg/dL" small />
+              <Inp label="Mg" type="number" value={pt.lab.mg} onChange={v=>uL("mg",v)} unit="mg/dL" small />
+              <Inp label="HCO3" type="number" value={pt.lab.hco3} onChange={v=>uL("hco3",v)} unit="mEq/L" small />
+            </div></Card>
+          <Card><Sec icon="🩸">Emocromo</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="Emoglobina" type="number" value={pt.lab.hb} onChange={v=>uL("hb",v)} unit="g/dL" small />
+              <Inp label="Ematocrito" type="number" value={pt.lab.ht} onChange={v=>uL("ht",v)} unit="%" small />
+              <Inp label="WBC" type="number" value={pt.lab.wbc} onChange={v=>uL("wbc",v)} unit="x10³" small />
+              <Inp label="PLT" type="number" value={pt.lab.plt} onChange={v=>uL("plt",v)} unit="x10³" small />
+            </div></Card>
+          <Card><Sec icon="🍬">Metabolismo e Proteine</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="Glicemia" type="number" value={pt.lab.glic} onChange={v=>uL("glic",v)} unit="mg/dL" small />
+              <Inp label="HbA1c" type="number" value={pt.lab.hba1c} onChange={v=>uL("hba1c",v)} unit="%" small />
+              <Inp label="Albumina" type="number" value={pt.lab.alb} onChange={v=>uL("alb",v)} unit="g/dL" small />
+              <Inp label="Proteine tot." type="number" value={pt.lab.protT} onChange={v=>uL("protT",v)} unit="g/dL" small />
+            </div></Card>
+          <Card><Sec icon="🟡">Epatico e Coagulazione</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="AST" type="number" value={pt.lab.ast} onChange={v=>uL("ast",v)} unit="U/L" small />
+              <Inp label="ALT" type="number" value={pt.lab.alt} onChange={v=>uL("alt",v)} unit="U/L" small />
+              <Inp label="Bilirubina" type="number" value={pt.lab.bil} onChange={v=>uL("bil",v)} unit="mg/dL" small />
+              <Inp label="GGT" type="number" value={pt.lab.ggt} onChange={v=>uL("ggt",v)} unit="U/L" small />
+              <Inp label="LDH" type="number" value={pt.lab.ldh} onChange={v=>uL("ldh",v)} unit="U/L" small />
+              <Inp label="INR" type="number" value={pt.lab.inr} onChange={v=>uL("inr",v)} small />
+              <Inp label="PT" type="number" value={pt.lab.pt} onChange={v=>uL("pt",v)} unit="sec" small />
+              <Inp label="Fibrinogeno" type="number" value={pt.lab.fib} onChange={v=>uL("fib",v)} unit="mg/dL" small />
+            </div></Card>
+          <Card><Sec icon="🔥">Flogosi</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="PCR" type="number" value={pt.lab.pcr} onChange={v=>uL("pcr",v)} unit="mg/L" small />
+              <Inp label="VES" type="number" value={pt.lab.ves} onChange={v=>uL("ves",v)} unit="mm/h" small />
+              <Inp label="Procalcitonina" type="number" value={pt.lab.proct} onChange={v=>uL("proct",v)} unit="ng/mL" small />
+            </div></Card>
+          <Card><Sec icon="🛡️">Immunologia</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="C3" type="number" value={pt.lab.c3} onChange={v=>uL("c3",v)} unit="mg/dL" small />
+              <Inp label="C4" type="number" value={pt.lab.c4} onChange={v=>uL("c4",v)} unit="mg/dL" small />
+              <Inp label="ANA" value={pt.lab.ana} onChange={v=>uL("ana",v)} ph="Neg/Pos" small />
+              <Inp label="ANCA" value={pt.lab.anca} onChange={v=>uL("anca",v)} ph="Neg/p/c-ANCA" small />
+              <Inp label="Anti-dsDNA" value={pt.lab.dsdna} onChange={v=>uL("dsdna",v)} ph="Neg/Pos" small />
+            </div></Card>
+          <Card><Sec icon="🔗">Marziale e Endocrino</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="Ferritina" type="number" value={pt.lab.ferr} onChange={v=>uL("ferr",v)} unit="ng/mL" small />
+              <Inp label="Sideremia" type="number" value={pt.lab.sid} onChange={v=>uL("sid",v)} unit="μg/dL" small />
+              <Inp label="Transferrina" type="number" value={pt.lab.transf} onChange={v=>uL("transf",v)} unit="mg/dL" small />
+              <Inp label="TSH" type="number" value={pt.lab.tsh} onChange={v=>uL("tsh",v)} unit="mUI/L" small />
+              <Inp label="PTH" type="number" value={pt.lab.pth} onChange={v=>uL("pth",v)} unit="pg/mL" small />
+              <Inp label="Vitamina D" type="number" value={pt.lab.vitd} onChange={v=>uL("vitd",v)} unit="ng/mL" small />
+            </div></Card>
+          <Card><Sec icon="💧">Urine e Proteinuria</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="Proteinuria 24h" type="number" value={pt.lab.prot24} onChange={v=>uL("prot24",v)} unit="mg/24h" small />
+              <Inp label="Microalbuminuria" type="number" value={pt.lab.microalb} onChange={v=>uL("microalb",v)} unit="mg/L" small />
+              <Inp label="Alb/Cr" type="number" value={pt.lab.albcr} onChange={v=>uL("albcr",v)} unit="mg/g" small />
+            </div>
+            <div style={{ marginTop:6 }}><Tx value={pt.lab.urNote} onChange={v=>uL("urNote",v)} ph="Ematuria, cilindri, cristalli..." rows={2} /></div></Card>
+          <Card><Sec icon="🫁">Emogasanalisi</Sec>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+              <Inp label="pH" type="number" value={pt.lab.ega.ph} onChange={v=>uEga("ph",v)} small />
+              <Inp label="pCO2" type="number" value={pt.lab.ega.pco2} onChange={v=>uEga("pco2",v)} unit="mmHg" small />
+              <Inp label="pO2" type="number" value={pt.lab.ega.po2} onChange={v=>uEga("po2",v)} unit="mmHg" small />
+              <Inp label="HCO3" type="number" value={pt.lab.ega.hco3} onChange={v=>uEga("hco3",v)} unit="mEq/L" small />
+              <Inp label="BE" type="number" value={pt.lab.ega.be} onChange={v=>uEga("be",v)} unit="mEq/L" small />
+              <Inp label="Lattati" type="number" value={pt.lab.ega.latt} onChange={v=>uEga("latt",v)} unit="mmol/L" small />
+            </div></Card>
+        </div>
+      );
+
+      const ScoreCard = ({ title, value, unit, color, sub }) => (
+        <div style={{ flex:"1 1 180px", background:"#0c1825", borderRadius:7, padding:14, border:`1px solid ${color||"#1a2838"}22` }}>
+          <div style={{ fontSize:10, color:"#7899aa", fontWeight:700, textTransform:"uppercase", marginBottom:5 }}>{title}</div>
+          <div style={{ fontSize:26, fontWeight:800, color: color||"#445566" }}>{value||"—"}</div>
+          {unit && <div style={{ fontSize:10, color:"#556677" }}>{unit}</div>}
+          {sub && <div style={{ marginTop:5, padding:"2px 7px", background:color, color:"#fff", borderRadius:4, display:"inline-block", fontSize:10, fontWeight:700 }}>{sub}</div>}
+        </div>
+      );
+
+      const rScores = () => (
+        <Card>
+          <Sec icon="📐">Score Clinici Calcolati</Sec>
+          <p style={{ fontSize:11, color:"#556677", marginBottom:14 }}>Calcolati in tempo reale dai dati inseriti.</p>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:12 }}>
+            <ScoreCard title="BMI" value={sc.bmi} unit="kg/m²"
+              color={sc.bmi?(parseFloat(sc.bmi)>30?"#ef4444":parseFloat(sc.bmi)>25?"#eab308":"#22c55e"):null} />
+            <ScoreCard title="eGFR (CKD-EPI 2021)" value={sc.egfr} unit="mL/min/1.73m²"
+              color={sc.kdigo?.color} sub={sc.kdigo?`KDIGO ${sc.kdigo.stage} — ${sc.kdigo.desc}`:null} />
+            <ScoreCard title="MELD-Na" value={sc.meld}
+              color={sc.meld?(sc.meld>=30?"#ef4444":sc.meld>=20?"#f97316":sc.meld>=10?"#eab308":"#22c55e"):null} />
+            <ScoreCard title="CHA₂DS₂-VASc" value={sc.cha2}
+              color={sc.cha2>=2?"#ef4444":sc.cha2===1?"#eab308":"#22c55e"}
+              sub={sc.cha2>=2?"Anticoagulazione raccomandata":sc.cha2===1?"Considerare anticoag.":"Basso rischio"} />
+          </div>
+        </Card>
+      );
+
+      const rDiag = () => (
+        <div>
+          <Card>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
+              <Sec icon="🧠">Diagnosi Differenziale AI</Sec>
+              <button onClick={runDiag} disabled={loading} style={{
+                padding:"9px 20px", background: loading?"#334455":"linear-gradient(135deg,#7c3aed,#a855f7)",
+                border:"none", borderRadius:7, color:"#fff", fontSize:13, fontWeight:700, cursor:loading?"wait":"pointer" }}>
+                {loading ? "⏳ Analisi..." : "🚀 Avvia Analisi"}
+              </button>
+            </div>
+          </Card>
+          {loading && <Card style={{ textAlign:"center", padding:30 }}>
+            <div style={{ fontSize:36, animation:"pulse 1.5s infinite" }}>🧠</div>
+            <p style={{ color:"#7dd3fc", fontWeight:600, marginTop:10 }}>Analisi in corso...</p></Card>}
+          {ai?.error && <Card style={{ borderColor:"#ef4444" }}><p style={{ color:"#ef4444" }}>⚠️ {ai.error}</p></Card>}
+          {ai && !ai.error && <>
+            <Card style={{ borderColor:"#7c3aed" }}>
+              <Sec icon="📝">Riepilogo Clinico</Sec>
+              <p style={{ color:"#b0bcc8", fontSize:13, lineHeight:1.6 }}>{ai.riepilogoClinico}</p>
+            </Card>
+            {ai.alertCritici?.length > 0 && <Card style={{ background:"#1a0a0a", borderColor:"#ef4444" }}>
+              <Sec icon="🚨">Alert Critici</Sec>
+              {ai.alertCritici.map((a,i) => <div key={i} style={{ padding:"7px 10px", background:"rgba(239,68,68,0.1)", borderRadius:5, marginBottom:5, color:"#fca5a5", fontSize:12.5 }}>⚠️ {a}</div>)}
+            </Card>}
+            <Card>
+              <Sec icon="🎯">Diagnosi Differenziali</Sec>
+              {(ai.diagnosiDifferenziali||[]).map((d,i) => (
+                <div key={i} style={{ padding:12, background:"#0c1825", borderRadius:7, marginBottom:8,
+                  borderLeft:`4px solid ${d.probabilita>=70?"#ef4444":d.probabilita>=40?"#f97316":d.probabilita>=20?"#eab308":"#22c55e"}` }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:6 }}>
+                    <b style={{ fontSize:14, color:"#e0f2fe" }}>{d.patologia}</b>
+                    <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+                      <span style={{ padding:"2px 8px", borderRadius:10, fontSize:11, fontWeight:700,
+                        background:d.probabilita>=70?"#ef4444":d.probabilita>=40?"#f97316":"#eab308", color:"#fff" }}>{d.probabilita}%</span>
+                      <span style={{ padding:"2px 8px", borderRadius:10, fontSize:10, fontWeight:600,
+                        background:d.gravita==="critica"?"#7f1d1d":d.gravita==="severa"?"#991b1b":d.gravita==="moderata"?"#92400e":"#065f46",
+                        color:"#fff" }}>{d.gravita}</span>
+                      <span style={{ padding:"2px 8px", borderRadius:10, fontSize:10, background:"#1e3550", color:"#7dd3fc" }}>{d.categoria}</span>
+                    </div>
+                  </div>
+                  <p style={{ color:"#7899aa", fontSize:12, marginTop:6, lineHeight:1.5 }}>{d.descrizione}</p>
+                  {d.criteriFavorevoli?.length>0 && <div style={{ marginTop:4, fontSize:11 }}>
+                    <span style={{ color:"#22c55e", fontWeight:600 }}>✓ </span><span style={{ color:"#7899aa" }}>{d.criteriFavorevoli.join(" • ")}</span></div>}
+                  {d.criteriControri?.length>0 && <div style={{ marginTop:3, fontSize:11 }}>
+                    <span style={{ color:"#f97316", fontWeight:600 }}>✗ </span><span style={{ color:"#7899aa" }}>{d.criteriControri.join(" • ")}</span></div>}
+                </div>
+              ))}
+            </Card>
+            <Card>
+              <Sec icon="💊">Terapia Farmacologica</Sec>
+              {(ai.terapiaFarmacologica||[]).map((f,i) => (
+                <div key={i} style={{ padding:12, background:"#0c1825", borderRadius:7, marginBottom:8, borderLeft:"4px solid #0ea5e9" }}>
+                  <b style={{ fontSize:13.5, color:"#e0f2fe" }}>{f.farmaco}</b>
+                  <div style={{ fontSize:11.5, color:"#7dd3fc", marginTop:1 }}>{f.classe}</div>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:12, marginTop:6, fontSize:11.5 }}>
+                    <div><span style={{ color:"#7899aa" }}>Dose: </span><span style={{ color:"#b0bcc8" }}>{f.dosaggio}</span></div>
+                    <div><span style={{ color:"#fbbf24" }}>Agg.renale: </span><span style={{ color:"#fde68a" }}>{f.aggiustamentoRenale}</span></div>
+                    <div><span style={{ color:"#7899aa" }}>Per: </span><span style={{ color:"#b0bcc8" }}>{f.indicazione}</span></div>
+                  </div>
+                  {f.controindicazioni?.length>0 && <div style={{ marginTop:5, fontSize:10.5, color:"#ef4444" }}>⛔ {f.controindicazioni.join(", ")}</div>}
+                  {f.interazioni?.length>0 && <div style={{ marginTop:3, fontSize:10.5, color:"#f97316" }}>⚡ {f.interazioni.join(", ")}</div>}
+                </div>
+              ))}
+            </Card>
+            {ai.accertamentiSuggeriti?.length>0 && <Card>
+              <Sec icon="🔍">Accertamenti Suggeriti</Sec>
+              {ai.accertamentiSuggeriti.map((a,i) => (
+                <div key={i} style={{ padding:"8px 12px", background:"#0c1825", borderRadius:5, marginBottom:5,
+                  display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:6 }}>
+                  <div><b style={{ color:"#e0e6ed", fontSize:12.5 }}>{a.esame}</b>
+                    <div style={{ fontSize:10.5, color:"#556677" }}>{a.motivazione}</div></div>
+                  <span style={{ padding:"2px 8px", borderRadius:10, fontSize:10, fontWeight:600,
+                    background:a.urgenza==="urgente"?"#991b1b":"#1e3550", color:a.urgenza==="urgente"?"#fca5a5":"#7dd3fc" }}>{a.urgenza}</span>
+                </div>
+              ))}
+            </Card>}
+            {ai.noteCliniche && <Card><Sec icon="📌">Note Cliniche</Sec><p style={{ color:"#b0bcc8", fontSize:12.5, lineHeight:1.6 }}>{ai.noteCliniche}</p></Card>}
+            <Card style={{ background:"#0c1520", borderColor:"#1e3550" }}>
+              <div style={{ display:"flex", gap:6, alignItems:"flex-start" }}>
+                <span style={{ fontSize:16 }}>⚕️</span>
+                <p style={{ fontSize:10.5, color:"#6889aa", lineHeight:1.6, margin:0 }}>
+                  <b style={{ color:"#fbbf24" }}>DISCLAIMER:</b> Analisi AI di supporto. Non sostituisce il giudizio clinico. Probabilità indicative.
+                </p>
+              </div>
+            </Card>
+          </>}
+        </div>
+      );
+
+      const rStorico = () => (
+        <Card>
+          <Sec icon="📁">Storico Pazienti ({pts.length})</Sec>
+          {pts.length === 0 ? <p style={{ color:"#556677", textAlign:"center", padding:20 }}>Nessun paziente salvato.</p> :
+            pts.map(p => (
+              <div key={p.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"10px 12px",
+                background:"#0c1825", borderRadius:7, border:"1px solid #1a2838", marginBottom:6 }}>
+                <div style={{ cursor:"pointer", flex:1 }} onClick={() => loadPt(p)}>
+                  <b style={{ color:"#e0e6ed", fontSize:13.5 }}>{p.an.cognome} {p.an.nome}</b>
+                  <div style={{ fontSize:10.5, color:"#556677" }}>
+                    {p.an.sesso} • Creato: {new Date(p.createdAt).toLocaleDateString("it-IT")}
+                    {p.updatedAt ? ` • Aggiornato: ${new Date(p.updatedAt).toLocaleDateString("it-IT")}` : ""}
+                    {p.diag && !p.diag.error ? " • 🧠" : ""}
+                  </div>
+                </div>
+                <button onClick={() => delPt(p.id)} style={{ background:"none", border:"none", color:"#ef4444", cursor:"pointer", fontSize:14 }}>✕</button>
+              </div>
+            ))
+          }
+        </Card>
+      );
+
+      const rReport = () => (
+        <div>
+          <Card>
+            <Sec icon="📄">Report Paziente</Sec>
+            <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+              <button onClick={printReport} style={{ padding:"10px 20px", background:"linear-gradient(135deg,#059669,#10b981)",
+                border:"none", borderRadius:7, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer" }}>🖨️ Stampa / PDF</button>
+              <button onClick={savePt} style={{ padding:"10px 20px", background:"linear-gradient(135deg,#0369a1,#0ea5e9)",
+                border:"none", borderRadius:7, color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer" }}>💾 Salva</button>
+            </div>
+          </Card>
+          <Card>
+            <Sec icon="📊">Riepilogo</Sec>
+            <div style={{ fontSize:12.5, color:"#7899aa", lineHeight:2 }}>
+              <div><b style={{ color:"#7dd3fc" }}>Paziente:</b> {pt.an.cognome} {pt.an.nome} ({pt.an.sesso}, {getAge()} anni)</div>
+              <div><b style={{ color:"#7dd3fc" }}>BMI:</b> {sc.bmi||"N/C"} — <b style={{ color:"#7dd3fc" }}>eGFR:</b> {sc.egfr||"N/C"} {sc.kdigo?`(${sc.kdigo.stage})`:""}</div>
+              <div><b style={{ color:"#7dd3fc" }}>MELD:</b> {sc.meld||"N/C"} — <b style={{ color:"#7dd3fc" }}>CHA₂DS₂-VASc:</b> {sc.cha2??"N/C"}</div>
+              <div><b style={{ color:"#7dd3fc" }}>Diagnosi AI:</b> {ai && !ai.error ? `✅ ${(ai.diagnosiDifferenziali||[]).length} diagnosi` : "❌ Non eseguita"}</div>
+            </div>
+          </Card>
+        </div>
+      );
+
+      const content = { dashboard:rDash, anagrafica:rAnag, anamnesi:rAnam, esame:rEsame,
+        laboratorio:rLab, scores:rScores, diagnosi:rDiag, storico:rStorico, report:rReport };
+
+      return (
+        <div style={{ height:"100vh", display:"flex", flexDirection:"column" }}>
+          {/* Top bar */}
+          <header style={{ background:"#0d1420", borderBottom:"1px solid #1a2838", padding:"7px 14px",
+            display:"flex", alignItems:"center", justifyContent:"space-between", flexShrink:0 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <button onClick={() => setMenu(!menu)} style={{
+                background:"none", border:"none", color:"#7dd3fc", fontSize:20, cursor:"pointer", padding:2,
+                display:"none" }} className="mbtn">☰</button>
+              <span style={{ fontSize:18 }}>🔬</span>
+              <b style={{ color:"#e0f2fe", fontSize:15 }}>NefrodiagPro</b>
+            </div>
+            {pt.an.cognome && <span style={{ fontSize:11.5, color:"#556677" }}>{pt.an.cognome} {pt.an.nome}</span>}
+          </header>
+
+          <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+            {/* Sidebar */}
+            <nav className="sidebar" style={{
+              width:190, minWidth:190, background:"#0d1420", borderRight:"1px solid #1a2838",
+              padding:"8px 6px", overflowY:"auto", flexShrink:0 }}>
+              {TABS.map(t => (
+                <button key={t.id} onClick={() => { setTab(t.id); setMenu(false); }}
+                  style={{ display:"flex", alignItems:"center", gap:7, width:"100%", padding:"9px 10px",
+                    background: tab===t.id ? "rgba(14,165,233,0.12)" : "transparent",
+                    border: tab===t.id ? "1px solid rgba(14,165,233,0.25)" : "1px solid transparent",
+                    borderRadius:7, color: tab===t.id ? "#7dd3fc" : "#556677",
+                    fontSize:12.5, fontWeight: tab===t.id ? 700 : 500, cursor:"pointer",
+                    marginBottom:2, textAlign:"left" }}>
+                  <span style={{ fontSize:14 }}>{t.icon}</span>{t.label}
+                </button>
+              ))}
+              <div style={{ borderTop:"1px solid #1a2838", margin:"8px 0", paddingTop:8 }}>
+                <button onClick={savePt} style={{ display:"flex", alignItems:"center", gap:6, width:"100%",
+                  padding:"8px 10px", background:"rgba(5,150,105,0.12)", border:"1px solid rgba(5,150,105,0.25)",
+                  borderRadius:7, color:"#34d399", fontSize:12, fontWeight:600, cursor:"pointer" }}>💾 Salva</button>
+              </div>
+            </nav>
+
+            {/* Mobile overlay */}
+            {menu && <div onClick={() => setMenu(false)} style={{
+              position:"fixed", inset:0, background:"rgba(0,0,0,0.5)", zIndex:98, display:"none" }} className="overlay" />}
+
+            {/* Main */}
+            <main style={{ flex:1, padding:14, overflowY:"auto", maxWidth:900 }}>
+              {content[tab]?.() || rDash()}
+            </main>
+          </div>
+
+          {/* Notification */}
+          {notif && <div style={{
+            position:"fixed", bottom:16, right:16, padding:"10px 18px",
+            background: notif.t==="ok" ? "#065f46" : "#92400e",
+            color:"#fff", borderRadius:7, fontSize:12.5, fontWeight:600,
+            boxShadow:"0 4px 16px rgba(0,0,0,0.4)", zIndex:1000, animation:"slideIn 0.3s ease-out" }}>
+            {notif.m}
+          </div>}
+
+          {/* Responsive CSS */}
+          <style>{`
+            @media(max-width:768px){
+              .sidebar{position:fixed!important;left:${menu?0:-260}px!important;top:42px!important;
+                width:240px!important;min-width:240px!important;height:calc(100vh - 42px)!important;
+                z-index:99!important;transition:left 0.25s!important;
+                box-shadow:${menu?"4px 0 16px rgba(0,0,0,0.5)":"none"}!important}
+              .mbtn{display:block!important}
+              .overlay{display:block!important}
+            }
+          `}</style>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
